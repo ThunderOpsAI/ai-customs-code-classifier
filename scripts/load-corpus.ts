@@ -318,9 +318,9 @@ async function main() {
   // 2. Database connection
   let pool: Pool | null = null;
   if (!options.dryRun) {
-    const databaseUrl = process.env.DATABASE_URL;
+    const databaseUrl = process.env.DIRECT_DATABASE_URL || process.env.DATABASE_URL;
     if (!databaseUrl) {
-      throw new Error('DATABASE_URL is required when dryRun is false');
+      throw new Error('DATABASE_URL or DIRECT_DATABASE_URL is required when dryRun is false');
     }
     pool = new Pool({ connectionString: databaseUrl });
   }
@@ -340,7 +340,8 @@ async function main() {
       if (useMock || !genAI) {
         expandedDescription = mockExpandDescription(entry.hs_code, entry.official_description);
       } else {
-        const llmModel = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+        const expansionModelName = process.env.CLASSIFICATION_MODEL || 'gemini-2.5-flash';
+        const llmModel = genAI.getGenerativeModel({ model: expansionModelName });
         const prompt = `You are an expert in customs tariff classification (Harmonized System).
 Given the official HS-6 description below, generate 3 to 5 common, plain-language consumer product names, search terms, and material variants that typically fall under this classification.
 Output ONLY a comma-separated list of items without introductory text, numbering, or bullet points.
@@ -361,9 +362,14 @@ Official Description: ${entry.official_description}`;
       if (useMock || !genAI) {
         embedding = mockEmbedDescription(expandedDescription);
       } else {
-        const embeddingModel = genAI.getGenerativeModel({ model: 'text-embedding-004' });
+        const embeddingModelName = process.env.EMBEDDING_MODEL || 'gemini-embedding-001';
+        const embeddingModel = genAI.getGenerativeModel({ model: embeddingModelName });
         const embedResult = await callWithRetry(async () => {
-          return await embeddingModel.embedContent(expandedDescription);
+          return await embeddingModel.embedContent(
+            embeddingModelName.includes('gemini-embedding')
+              ? ({ content: { parts: [{ text: expandedDescription }] }, outputDimensionality: 768 } as any)
+              : expandedDescription
+          );
         });
 
         embedding = embedResult.embedding.values;

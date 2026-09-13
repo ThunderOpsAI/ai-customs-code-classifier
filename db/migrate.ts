@@ -4,7 +4,7 @@ import path from 'path';
 import { Pool } from 'pg';
 
 async function runMigrations() {
-  const databaseUrl = process.env.DATABASE_URL;
+  const databaseUrl = process.env.DIRECT_DATABASE_URL || process.env.DATABASE_URL;
   if (!databaseUrl) {
     console.error('Error: DATABASE_URL environment variable is not defined.');
     process.exit(1);

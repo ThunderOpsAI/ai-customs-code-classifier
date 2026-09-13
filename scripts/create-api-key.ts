@@ -86,7 +86,7 @@ async function main() {
     process.exit(1);
   }
 
-  const databaseUrl = process.env.DATABASE_URL;
+  const databaseUrl = process.env.DIRECT_DATABASE_URL || process.env.DATABASE_URL;
   if (!databaseUrl) {
     console.error('Error: DATABASE_URL environment variable is not defined.');
     console.error('Provide it via .env file or: DATABASE_URL="..." npx tsx scripts/create-api-key.ts ...');

@@ -205,7 +205,7 @@ export async function classify(
       caption = await withTimeout(
         (async () => {
           const ai = getGenAI();
-          const modelName = process.env.CAPTIONING_MODEL || 'gemini-1.5-flash';
+          const modelName = process.env.CAPTIONING_MODEL || 'gemini-2.5-flash';
           const model = ai.getGenerativeModel({ model: modelName });
           const response = await model.generateContent([
             {
@@ -240,8 +240,13 @@ export async function classify(
     embeddingValues = await withTimeout(
       (async () => {
         const ai = getGenAI();
-        const model = ai.getGenerativeModel({ model: 'text-embedding-004' });
-        const res = await model.embedContent(unifiedQuery);
+        const embeddingModelName = process.env.EMBEDDING_MODEL || 'gemini-embedding-001';
+        const model = ai.getGenerativeModel({ model: embeddingModelName });
+        const res = await model.embedContent(
+          embeddingModelName.includes('gemini-embedding')
+            ? ({ content: { parts: [{ text: unifiedQuery }] }, outputDimensionality: 768 } as any)
+            : unifiedQuery
+        );
         return res.embedding.values;
       })(),
       15000,
@@ -291,7 +296,7 @@ export async function classify(
       rationalesMap = await withTimeout(
         (async () => {
           const ai = getGenAI();
-          const modelName = process.env.CLASSIFICATION_MODEL || 'gemini-1.5-flash';
+          const modelName = process.env.CLASSIFICATION_MODEL || 'gemini-2.5-flash';
           const model = ai.getGenerativeModel({
             model: modelName,
             generationConfig: {
