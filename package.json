@@ -9,6 +9,7 @@
     "lint": "next lint",
     "migrate": "tsx db/migrate.ts",
     "load-corpus": "tsx scripts/load-corpus.ts",
+    "load-corpus:resume": "tsx scripts/load-corpus.ts --fast",
     "test": "jest"
   },
   "dependencies": {

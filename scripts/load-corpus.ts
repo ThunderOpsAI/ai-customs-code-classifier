@@ -343,14 +343,16 @@ async function main() {
   console.log('\n--- Step 2: Processing Expansions, Embeddings & Upserting ---');
   const startTime = Date.now();
 
+  let quotaExhausted = false;
   const BATCH_SIZE = 5;
   for (let i = 0; i < entriesToProcess.length; i += BATCH_SIZE) {
+    if (quotaExhausted) break;
     const batch = entriesToProcess.slice(i, i + BATCH_SIZE);
     await Promise.all(
       batch.map(async (entry) => {
-        if (existingSet.has(entry.hs_code)) {
+        if (quotaExhausted || existingSet.has(entry.hs_code)) {
           processedCount++;
-          successCount++;
+          if (existingSet.has(entry.hs_code)) successCount++;
           return;
         }
 
@@ -416,12 +418,22 @@ Official Description: ${entry.official_description}`;
         } catch (err: unknown) {
           errorCount++;
           const message = err instanceof Error ? err.message : String(err);
+          if (message.includes('Quota exceeded') || message.includes('QuotaFailure')) {
+            quotaExhausted = true;
+          }
           console.error(`[ERROR] Failed processing HS Code ${entry.hs_code}: ${message}`);
         } finally {
           processedCount++;
         }
       })
     );
+
+    if (quotaExhausted) {
+      console.log('\n[INFO] Daily free-tier quota reached for today. Safely stopping run.');
+      console.log(`Currently stored in Neon: ${successCount} / ${entriesToProcess.length} codes (${((successCount / entriesToProcess.length) * 100).toFixed(1)}%).`);
+      console.log(`Run 'npm run load-corpus:resume' when quota resets to continue smoothly.\n`);
+      break;
+    }
 
     // Progress logging
     if (processedCount % 100 === 0 || i + BATCH_SIZE >= entriesToProcess.length) {
