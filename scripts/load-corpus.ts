@@ -22,6 +22,7 @@ interface CliOptions {
   limit?: number;
   mock: boolean;
   dryRun: boolean;
+  fast: boolean;
   url?: string;
   file?: string;
   noCache: boolean;
@@ -37,6 +38,7 @@ function parseArgs(): CliOptions {
   const options: CliOptions = {
     mock: false,
     dryRun: false,
+    fast: false,
     noCache: false,
   };
 
@@ -48,6 +50,8 @@ function parseArgs(): CliOptions {
       }
     } else if (arg === '--mock') {
       options.mock = true;
+    } else if (arg === '--fast' || arg === '--skip-llm-expansion') {
+      options.fast = true;
     } else if (arg === '--dry-run') {
       options.dryRun = true;
     } else if (arg === '--no-cache') {
@@ -339,84 +343,92 @@ async function main() {
   console.log('\n--- Step 2: Processing Expansions, Embeddings & Upserting ---');
   const startTime = Date.now();
 
-  for (const entry of entriesToProcess) {
-    if (existingSet.has(entry.hs_code)) {
-      processedCount++;
-      successCount++;
-      continue;
-    }
-    try {
-      let expandedDescription = entry.official_description;
+  const BATCH_SIZE = 5;
+  for (let i = 0; i < entriesToProcess.length; i += BATCH_SIZE) {
+    const batch = entriesToProcess.slice(i, i + BATCH_SIZE);
+    await Promise.all(
+      batch.map(async (entry) => {
+        if (existingSet.has(entry.hs_code)) {
+          processedCount++;
+          successCount++;
+          return;
+        }
 
-      // Synthetic expansion
-      if (useMock || !genAI) {
-        expandedDescription = mockExpandDescription(entry.hs_code, entry.official_description);
-      } else {
-        const expansionModelName = process.env.CLASSIFICATION_MODEL || 'gemini-2.5-flash';
-        const llmModel = genAI.getGenerativeModel({ model: expansionModelName });
-        const prompt = `You are an expert in customs tariff classification (Harmonized System).
+        try {
+          let expandedDescription = entry.official_description;
+
+          // Synthetic expansion
+          if (useMock || options.fast || !genAI) {
+            expandedDescription = mockExpandDescription(entry.hs_code, entry.official_description);
+          } else {
+            const expansionModelName = process.env.CLASSIFICATION_MODEL || 'gemini-2.5-flash';
+            const llmModel = genAI.getGenerativeModel({ model: expansionModelName });
+            const prompt = `You are an expert in customs tariff classification (Harmonized System).
 Given the official HS-6 description below, generate 3 to 5 common, plain-language consumer product names, search terms, and material variants that typically fall under this classification.
 Output ONLY a comma-separated list of items without introductory text, numbering, or bullet points.
 
 HS Code: ${entry.hs_code}
 Official Description: ${entry.official_description}`;
 
-        const expansionResult = await callWithRetry(async () => {
-          const response = await llmModel.generateContent(prompt);
-          return response.response.text().trim();
-        });
+            const expansionResult = await callWithRetry(async () => {
+              const response = await llmModel.generateContent(prompt);
+              return response.response.text().trim();
+            });
 
-        expandedDescription = `${entry.official_description}\n\nCommon products and variants: ${expansionResult}`;
-      }
+            expandedDescription = `${entry.official_description}\n\nCommon products and variants: ${expansionResult}`;
+          }
 
-      // Embedding
-      let embedding: number[];
-      if (useMock || !genAI) {
-        embedding = mockEmbedDescription(expandedDescription);
-      } else {
-        const embeddingModelName = process.env.EMBEDDING_MODEL || 'gemini-embedding-001';
-        const embeddingModel = genAI.getGenerativeModel({ model: embeddingModelName });
-        const embedResult = await callWithRetry(async () => {
-          return await embeddingModel.embedContent(
-            embeddingModelName.includes('gemini-embedding')
-              ? ({ content: { parts: [{ text: expandedDescription }] }, outputDimensionality: 768 } as any)
-              : expandedDescription
-          );
-        });
+          // Embedding
+          let embedding: number[];
+          if (useMock || !genAI) {
+            embedding = mockEmbedDescription(expandedDescription);
+          } else {
+            const embeddingModelName = process.env.EMBEDDING_MODEL || 'gemini-embedding-001';
+            const embeddingModel = genAI.getGenerativeModel({ model: embeddingModelName });
+            const embedResult = await callWithRetry(async () => {
+              return await embeddingModel.embedContent(
+                embeddingModelName.includes('gemini-embedding')
+                  ? ({ content: { parts: [{ text: expandedDescription }] }, outputDimensionality: 768 } as any)
+                  : expandedDescription
+              );
+            });
 
-        embedding = embedResult.embedding.values;
-        if (!embedding || embedding.length !== 768) {
-          throw new Error(`Invalid embedding dimension: expected 768, got ${embedding ? embedding.length : 0}`);
+            embedding = embedResult.embedding.values;
+            if (!embedding || embedding.length !== 768) {
+              throw new Error(`Invalid embedding dimension: expected 768, got ${embedding ? embedding.length : 0}`);
+            }
+          }
+
+          // Upsert into hs_corpus
+          if (!options.dryRun && pool) {
+            const embeddingPgVector = `[${embedding.join(',')}]`;
+            await pool.query(
+              `INSERT INTO hs_corpus (hs_code, description, embedding)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (hs_code) DO UPDATE
+               SET description = EXCLUDED.description,
+                   embedding = EXCLUDED.embedding`,
+              [entry.hs_code, expandedDescription, embeddingPgVector]
+            );
+          }
+
+          successCount++;
+        } catch (err: unknown) {
+          errorCount++;
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(`[ERROR] Failed processing HS Code ${entry.hs_code}: ${message}`);
+        } finally {
+          processedCount++;
         }
-      }
+      })
+    );
 
-      // Upsert into hs_corpus
-      if (!options.dryRun && pool) {
-        const embeddingPgVector = `[${embedding.join(',')}]`;
-        await pool.query(
-          `INSERT INTO hs_corpus (hs_code, description, embedding)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (hs_code) DO UPDATE
-           SET description = EXCLUDED.description,
-               embedding = EXCLUDED.embedding`,
-          [entry.hs_code, expandedDescription, embeddingPgVector]
-        );
-      }
-
-      successCount++;
-    } catch (err: unknown) {
-      errorCount++;
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[ERROR] Failed processing HS Code ${entry.hs_code}: ${message}`);
-    }
-
-    processedCount++;
-
-    // Progress logging every 100 codes
-    if (processedCount % 100 === 0 || processedCount === entriesToProcess.length) {
+    // Progress logging
+    if (processedCount % 100 === 0 || i + BATCH_SIZE >= entriesToProcess.length) {
       const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
+      const pct = (((processedCount) / entriesToProcess.length) * 100).toFixed(1);
       console.log(
-        `[PROGRESS] Processed ${processedCount}/${entriesToProcess.length} codes (${successCount} succeeded, ${errorCount} errors) in ${elapsedSec}s`
+        `[PROGRESS] ${pct}% - Processed ${processedCount}/${entriesToProcess.length} codes (${successCount} succeeded, ${errorCount} errors) in ${elapsedSec}s`
       );
     }
   }
