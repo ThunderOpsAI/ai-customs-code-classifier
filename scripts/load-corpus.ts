@@ -325,6 +325,13 @@ async function main() {
     pool = new Pool({ connectionString: databaseUrl });
   }
 
+  let existingSet = new Set<string>();
+  if (!options.dryRun && pool) {
+    const existingRes = await pool.query('SELECT hs_code FROM hs_corpus');
+    existingSet = new Set(existingRes.rows.map((r: { hs_code: string }) => r.hs_code));
+    console.log(`Already ingested codes in database: ${existingSet.size}`);
+  }
+
   let processedCount = 0;
   let successCount = 0;
   let errorCount = 0;
@@ -333,6 +340,11 @@ async function main() {
   const startTime = Date.now();
 
   for (const entry of entriesToProcess) {
+    if (existingSet.has(entry.hs_code)) {
+      processedCount++;
+      successCount++;
+      continue;
+    }
     try {
       let expandedDescription = entry.official_description;
 
