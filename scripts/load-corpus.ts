@@ -271,7 +271,7 @@ function mockEmbedDescription(seedStr: string): number[] {
 }
 
 // Live Gemini call with retries and exponential backoff
-async function callWithRetry<T>(fn: () => Promise<T>, maxRetries = 4, initialDelayMs = 1000): Promise<T> {
+async function callWithRetry<T>(fn: () => Promise<T>, maxRetries = 5, initialDelayMs = 1500): Promise<T> {
   let delay = initialDelayMs;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
@@ -279,8 +279,17 @@ async function callWithRetry<T>(fn: () => Promise<T>, maxRetries = 4, initialDel
     } catch (err: unknown) {
       if (attempt === maxRetries) throw err;
       const message = err instanceof Error ? err.message : String(err);
-      console.warn(`[WARN] API call failed (attempt ${attempt}/${maxRetries}): ${message}. Retrying in ${delay}ms...`);
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      let waitMs = delay;
+      if (message.includes('429') || message.includes('quota') || message.includes('QuotaFailure')) {
+        const match = message.match(/retry in ([0-9.]+)s/i) || message.match(/"retryDelay":\s*"(\d+)s"/);
+        if (match && match[1]) {
+          waitMs = Math.ceil(parseFloat(match[1]) * 1000) + 1500;
+        } else {
+          waitMs = 12000;
+        }
+      }
+      console.warn(`[WARN] API call failed (attempt ${attempt}/${maxRetries}): ${message.slice(0, 160)}... Retrying in ${waitMs}ms...`);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
       delay *= 2;
     }
   }
@@ -344,7 +353,7 @@ async function main() {
   const startTime = Date.now();
 
   let quotaExhausted = false;
-  const BATCH_SIZE = 5;
+  const BATCH_SIZE = 4;
   for (let i = 0; i < entriesToProcess.length; i += BATCH_SIZE) {
     if (quotaExhausted) break;
     const batch = entriesToProcess.slice(i, i + BATCH_SIZE);
@@ -418,10 +427,10 @@ Official Description: ${entry.official_description}`;
         } catch (err: unknown) {
           errorCount++;
           const message = err instanceof Error ? err.message : String(err);
-          if (message.includes('Quota exceeded') || message.includes('QuotaFailure')) {
+          if (message.includes('PerDay')) {
             quotaExhausted = true;
           }
-          console.error(`[ERROR] Failed processing HS Code ${entry.hs_code}: ${message}`);
+          console.error(`[ERROR] Failed processing HS Code ${entry.hs_code}: ${message.slice(0, 160)}`);
         } finally {
           processedCount++;
         }
@@ -433,6 +442,11 @@ Official Description: ${entry.official_description}`;
       console.log(`Currently stored in Neon: ${successCount} / ${entriesToProcess.length} codes (${((successCount / entriesToProcess.length) * 100).toFixed(1)}%).`);
       console.log(`Run 'npm run load-corpus:resume' when quota resets to continue smoothly.\n`);
       break;
+    }
+
+    // Pacing to strictly avoid the 100 RPM ceiling
+    if (!useMock && i + BATCH_SIZE < entriesToProcess.length) {
+      await new Promise((resolve) => setTimeout(resolve, 2500));
     }
 
     // Progress logging
